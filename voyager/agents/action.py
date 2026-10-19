@@ -3,10 +3,10 @@ import time
 
 import voyager.utils as U
 from javascript import require
-from langchain.chat_models import ChatOpenAI
 from langchain.prompts import SystemMessagePromptTemplate
 from langchain.schema import AIMessage, HumanMessage, SystemMessage
 
+from voyager.llms import make_chat_model
 from voyager.prompts import load_prompt
 from voyager.control_primitives_context import load_control_primitives_context
 
@@ -17,6 +17,7 @@ class ActionAgent:
         model_name="gpt-3.5-turbo",
         temperature=0,
         request_timout=120,
+        llm_backend="openai",
         ckpt_dir="ckpt",
         resume=False,
         chat_log=True,
@@ -31,7 +32,8 @@ class ActionAgent:
             self.chest_memory = U.load_json(f"{ckpt_dir}/action/chest_memory.json")
         else:
             self.chest_memory = {}
-        self.llm = ChatOpenAI(
+        self.llm = make_chat_model(
+            backend=llm_backend,
             model_name=model_name,
             temperature=temperature,
             request_timeout=request_timout,
@@ -210,7 +212,7 @@ class ActionAgent:
 
                 code_pattern = re.compile(r"```(?:javascript|js)(.*?)```", re.DOTALL)
                 code = "\n".join(code_pattern.findall(message.content))
-                parsed = babel.parse(code)
+                parsed = babel.parseSync(code)
                 functions = []
                 assert len(list(parsed.program.body)) > 0, "No functions found"
                 for i, node in enumerate(parsed.program.body):

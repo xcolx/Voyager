@@ -4,10 +4,9 @@ import random
 import re
 
 import voyager.utils as U
+from voyager.llms import make_chat_model, make_embeddings
 from voyager.prompts import load_prompt
 from voyager.utils.json_utils import fix_and_parse_json
-from langchain.chat_models import ChatOpenAI
-from langchain.embeddings.openai import OpenAIEmbeddings
 from langchain.schema import HumanMessage, SystemMessage
 from langchain.vectorstores import Chroma
 
@@ -20,18 +19,21 @@ class CurriculumAgent:
         qa_model_name="gpt-3.5-turbo",
         qa_temperature=0,
         request_timout=120,
+        llm_backend="openai",
         ckpt_dir="ckpt",
         resume=False,
         mode="auto",
         warm_up=None,
         core_inventory_items: str | None = None,
     ):
-        self.llm = ChatOpenAI(
+        self.llm = make_chat_model(
+            backend=llm_backend,
             model_name=model_name,
             temperature=temperature,
             request_timeout=request_timout,
         )
-        self.qa_llm = ChatOpenAI(
+        self.qa_llm = make_chat_model(
+            backend=llm_backend,
             model_name=qa_model_name,
             temperature=qa_temperature,
             request_timeout=request_timout,
@@ -57,9 +59,13 @@ class CurriculumAgent:
         # vectordb for qa cache
         self.qa_cache_questions_vectordb = Chroma(
             collection_name="qa_cache_questions_vectordb",
-            embedding_function=OpenAIEmbeddings(),
+            embedding_function=make_embeddings(llm_backend),
             persist_directory=f"{ckpt_dir}/curriculum/vectordb",
         )
+        # rebuild an empty vectordb from qa_cache.json, e.g. after switching embedding backends
+        if self.qa_cache_questions_vectordb._collection.count() == 0 and self.qa_cache:
+            self.qa_cache_questions_vectordb.add_texts(texts=list(self.qa_cache.keys()))
+            self.qa_cache_questions_vectordb.persist()
         assert self.qa_cache_questions_vectordb._collection.count() == len(
             self.qa_cache
         ), (

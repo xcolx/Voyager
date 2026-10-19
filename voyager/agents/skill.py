@@ -1,11 +1,10 @@
 import os
 
 import voyager.utils as U
-from langchain.chat_models import ChatOpenAI
-from langchain.embeddings.openai import OpenAIEmbeddings
 from langchain.schema import HumanMessage, SystemMessage
 from langchain.vectorstores import Chroma
 
+from voyager.llms import make_chat_model, make_embeddings
 from voyager.prompts import load_prompt
 from voyager.control_primitives import load_control_primitives
 
@@ -17,10 +16,12 @@ class SkillManager:
         temperature=0,
         retrieval_top_k=5,
         request_timout=120,
+        llm_backend="openai",
         ckpt_dir="ckpt",
         resume=False,
     ):
-        self.llm = ChatOpenAI(
+        self.llm = make_chat_model(
+            backend=llm_backend,
             model_name=model_name,
             temperature=temperature,
             request_timeout=request_timout,
@@ -39,9 +40,18 @@ class SkillManager:
         self.ckpt_dir = ckpt_dir
         self.vectordb = Chroma(
             collection_name="skill_vectordb",
-            embedding_function=OpenAIEmbeddings(),
+            embedding_function=make_embeddings(llm_backend),
             persist_directory=f"{ckpt_dir}/skill/vectordb",
         )
+        # rebuild an empty vectordb from skills.json, e.g. after switching embedding backends
+        if self.vectordb._collection.count() == 0 and self.skills:
+            print(f"\033[33mRebuilding skill vectordb for {len(self.skills)} skills\033[0m")
+            self.vectordb.add_texts(
+                texts=[entry["description"] for entry in self.skills.values()],
+                ids=list(self.skills.keys()),
+                metadatas=[{"name": name} for name in self.skills.keys()],
+            )
+            self.vectordb.persist()
         assert self.vectordb._collection.count() == len(self.skills), (
             f"Skill Manager's vectordb is not synced with skills.json.\n"
             f"There are {self.vectordb._collection.count()} skills in vectordb but {len(self.skills)} skills in skills.json.\n"

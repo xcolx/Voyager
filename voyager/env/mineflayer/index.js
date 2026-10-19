@@ -16,6 +16,13 @@ const Chests = require("./lib/observation/chests");
 const { plugin: tool } = require("mineflayer-tool");
 
 let bot = null;
+let botDisconnected = false;
+
+// end a bot on purpose, without triggering the exit on unexpected disconnects
+function stopBot(target) {
+    target.voyagerStopping = true;
+    target.end();
+}
 
 const app = express();
 
@@ -23,8 +30,12 @@ app.use(bodyParser.json({ limit: "50mb" }));
 app.use(bodyParser.urlencoded({ limit: "50mb", extended: false }));
 
 app.post("/start", (req, res) => {
-    if (bot) onDisconnect("Restarting bot");
+    if (bot) {
+        bot.voyagerStopping = true;
+        onDisconnect("Restarting bot");
+    }
     bot = null;
+    botDisconnected = false;
     console.log(req.body);
     bot = mineflayer.createBot({
         host: "localhost", // minecraft server ip
@@ -43,6 +54,16 @@ app.post("/start", (req, res) => {
     bot.iron_pickaxe = false;
 
     bot.on("kicked", onDisconnect);
+    // after a kick or a lost connection every pending request would wait forever,
+    // so exit and let the Python side restart mineflayer and rejoin
+    const thisBot = bot;
+    thisBot.on("end", (reason) => {
+        if (thisBot.voyagerStopping) return;
+        console.log(`Bot disconnected unexpectedly: ${reason}`);
+        botDisconnected = true;
+        // give pending responses a moment to flush
+        setTimeout(() => process.exit(1), 1000);
+    });
 
     // mounting will cause physicsTick to stop
     bot.on("mount", () => {
@@ -52,6 +73,10 @@ app.post("/start", (req, res) => {
     bot.once("spawn", async () => {
         bot.removeListener("error", onConnectionFailed);
         let itemTicks = 1;
+        if (req.body.unpause) {
+            // the previous bot left the server paused
+            bot.chat("/pause");
+        }
         if (req.body.reset === "hard") {
             bot.chat("/clear @s");
             bot.chat("/kill @s");
@@ -94,6 +119,22 @@ app.post("/start", (req, res) => {
         ) {
             bot.iron_pickaxe = true;
         }
+
+        // mineflayer 4.8.1 sends window_click changedSlots as bare slot numbers, which the
+        // installed protocol cannot serialize; newer mineflayer maps them to {location, item}
+        const Item = require("prismarine-item")(bot.registry);
+        const write = bot._client.write.bind(bot._client);
+        bot._client.write = (name, params) => {
+            if (name === "window_click" && Array.isArray(params.changedSlots)) {
+                const window = bot.currentWindow || bot.inventory;
+                params.changedSlots = params.changedSlots.map((slot) =>
+                    typeof slot === "number"
+                        ? { location: slot, item: Item.toNotch(window.slots[slot]) }
+                        : slot
+                );
+            }
+            return write(name, params);
+        };
 
         const { pathfinder } = require("mineflayer-pathfinder");
         const tool = require("mineflayer-tool").plugin;
@@ -140,16 +181,21 @@ app.post("/start", (req, res) => {
         res.status(400).json({ error: e });
     }
     function onDisconnect(message) {
+        console.log(message);
+        if (!bot) return;
         if (bot.viewer) {
             bot.viewer.close();
         }
         bot.end();
-        console.log(message);
         bot = null;
     }
 });
 
 app.post("/step", async (req, res) => {
+    if (!bot) {
+        res.status(400).json({ error: "Bot not spawned" });
+        return;
+    }
     // import useful package
     let response_sent = false;
     function otherError(err) {
@@ -399,7 +445,7 @@ app.post("/step", async (req, res) => {
 });
 
 app.post("/stop", (req, res) => {
-    bot.end();
+    if (bot) stopBot(bot);
     res.json({
         message: "Bot stopped",
     });
@@ -411,8 +457,10 @@ app.post("/pause", (req, res) => {
         return;
     }
     bot.chat("/pause");
-    bot.waitForTicks(bot.waitTicks).then(() => {
-        res.json({ message: "Success" });
+    // a disconnect stops ticks, so also answer when the bot ends
+    const ended = new Promise((resolve) => bot.once("end", resolve));
+    Promise.race([bot.waitForTicks(bot.waitTicks), ended]).then(() => {
+        res.json({ message: "Success", disconnected: botDisconnected });
     });
 });
 

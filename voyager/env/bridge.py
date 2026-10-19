@@ -85,17 +85,30 @@ class VoyagerEnv(gym.Env):
             print("Mineflayer process has exited, restarting")
             self.mineflayer.run()
             if not self.mineflayer.is_running:
+                retry += 1
                 if retry > 3:
                     raise RuntimeError("Mineflayer process failed to start")
                 else:
                     continue
             print(self.mineflayer.ready_line)
-            res = requests.post(
-                f"{self.server}/start",
-                json=self.reset_options,
-                timeout=self.request_timeout,
-            )
-            if res.status_code != 200:
+            try:
+                res = requests.post(
+                    f"{self.server}/start",
+                    # a bot that got kicked while the server was paused cannot unpause it, so the new one does
+                    json={**self.reset_options, "unpause": self.server_paused},
+                    timeout=self.request_timeout,
+                )
+            except requests.exceptions.RequestException as e:
+                # the bot got disconnected while joining, mineflayer exits and is restarted
+                retry += 1
+                if retry > 3:
+                    raise
+                print(f"Bot failed to join ({e}), retrying")
+                self.mineflayer.stop()
+                continue
+            if res.status_code == 200:
+                self.server_paused = False
+            else:
                 self.mineflayer.stop()
                 raise RuntimeError(
                     f"Minecraft server reply with code {res.status_code}"
@@ -174,16 +187,29 @@ class VoyagerEnv(gym.Env):
 
     def pause(self):
         if self.mineflayer.is_running and not self.server_paused:
-            res = requests.post(f"{self.server}/pause")
-            if res.status_code == 200:
+            res = self._toggle_pause()
+            if res is not None and res.status_code == 200:
                 self.server_paused = True
         return self.server_paused
 
     def unpause(self):
         if self.mineflayer.is_running and self.server_paused:
-            res = requests.post(f"{self.server}/pause")
-            if res.status_code == 200:
+            res = self._toggle_pause()
+            if res is not None and res.status_code == 200:
                 self.server_paused = False
-            else:
+            elif res is not None:
                 print(res.json())
         return self.server_paused
+
+    def _toggle_pause(self):
+        try:
+            res = requests.post(f"{self.server}/pause", timeout=60)
+        except requests.exceptions.RequestException as e:
+            # mineflayer died, the next check_process restarts it
+            print(f"Pause request failed: {e}")
+            return None
+        if res.status_code == 200 and res.json().get("disconnected"):
+            # the bot got kicked, wait for mineflayer to exit so check_process restarts it
+            print("Bot got disconnected from Minecraft, restarting mineflayer")
+            self.mineflayer.wait_for_exit(timeout=10)
+        return res

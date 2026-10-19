@@ -2,6 +2,7 @@ import copy
 import json
 import os
 import time
+import traceback
 from typing import Dict
 
 import voyager.utils as U
@@ -21,6 +22,7 @@ class Voyager:
         azure_login: Dict[str, str] = None,
         server_port: int = 3000,
         openai_api_key: str = None,
+        llm_backend: str = "openai",
         env_wait_ticks: int = 20,
         env_request_timeout: int = 600,
         max_iterations: int = 160,
@@ -58,7 +60,9 @@ class Voyager:
         :param mc_port: minecraft in-game port
         :param azure_login: minecraft login config
         :param server_port: mineflayer port
-        :param openai_api_key: openai api key
+        :param openai_api_key: openai api key, not needed for the claude_cli backend
+        :param llm_backend: "openai" for the OpenAI API, "claude_cli" for the local claude CLI
+        (gpt-4 maps to sonnet, gpt-3.5-turbo to haiku, or pass Claude model names directly)
         :param env_wait_ticks: how many ticks at the end each step will wait, if you found some chat log missing,
         you should increase this value
         :param env_request_timeout: how many seconds to wait for each step, if the code execution exceeds this time,
@@ -112,13 +116,15 @@ class Voyager:
         self.max_iterations = max_iterations
 
         # set openai api key
-        os.environ["OPENAI_API_KEY"] = openai_api_key
+        if openai_api_key:
+            os.environ["OPENAI_API_KEY"] = openai_api_key
 
         # init agents
         self.action_agent = ActionAgent(
             model_name=action_agent_model_name,
             temperature=action_agent_temperature,
             request_timout=openai_api_request_timeout,
+            llm_backend=llm_backend,
             ckpt_dir=ckpt_dir,
             resume=resume,
             chat_log=action_agent_show_chat_log,
@@ -131,6 +137,7 @@ class Voyager:
             qa_model_name=curriculum_agent_qa_model_name,
             qa_temperature=curriculum_agent_qa_temperature,
             request_timout=openai_api_request_timeout,
+            llm_backend=llm_backend,
             ckpt_dir=ckpt_dir,
             resume=resume,
             mode=curriculum_agent_mode,
@@ -141,6 +148,7 @@ class Voyager:
             model_name=critic_agent_model_name,
             temperature=critic_agent_temperature,
             request_timout=openai_api_request_timeout,
+            llm_backend=llm_backend,
             mode=critic_agent_mode,
         )
         self.skill_manager = SkillManager(
@@ -148,6 +156,7 @@ class Voyager:
             temperature=skill_manager_temperature,
             retrieval_top_k=skill_manager_retrieval_top_k,
             request_timout=openai_api_request_timeout,
+            llm_backend=llm_backend,
             ckpt_dir=skill_library_dir if skill_library_dir else ckpt_dir,
             resume=True if resume or skill_library_dir else False,
         )
@@ -259,8 +268,8 @@ class Voyager:
             self.messages = [system_message, human_message]
         else:
             assert isinstance(parsed_result, str)
-            self.recorder.record([], self.task)
             print(f"\033[34m{parsed_result} Trying again!\033[0m")
+            self.recorder.record([], self.task)
         assert len(self.messages) == 2
         self.action_agent_rollout_num_iter += 1
         done = (
@@ -349,6 +358,7 @@ class Voyager:
                 # use red color background to print the error
                 print("Your last round rollout terminated due to error:")
                 print(f"\033[41m{e}\033[0m")
+                traceback.print_exc()
 
             if info["success"]:
                 self.skill_manager.add_new_skill(info)

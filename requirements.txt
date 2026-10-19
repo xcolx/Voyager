@@ -1,10 +1,10 @@
 tqdm
-langchain
+langchain==0.0.350
+langchain-community==0.0.3
 javascript
 setuptools
 openai
 chardet
-cchardet
 chromadb==0.3.29
 tiktoken
 requests

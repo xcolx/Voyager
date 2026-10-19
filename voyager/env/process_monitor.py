@@ -83,8 +83,17 @@ class SubprocessMonitor:
     #     if self.process.is_running():
     #         self.stop()
 
+    def wait_for_exit(self, timeout=None):
+        if self.process is None:
+            return
+        try:
+            self.process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            self.stop()
+
     @property
     def is_running(self):
         if self.process is None:
             return False
-        return self.process.is_running()
+        # poll() reaps an exited process, psutil reports zombies as still running
+        return self.process.poll() is None

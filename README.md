@@ -145,6 +145,26 @@ voyager.inference(sub_goals=sub_goals)
 
 For all valid skill libraries, see [Learned Skill Libraries](skill_library/README.md).
 
+## Using the local Claude CLI instead of OpenAI
+If you have [Claude Code](https://claude.com/claude-code) installed and logged in, Voyager can send every LLM call through the `claude` CLI. No OpenAI key is needed. Claude has no embeddings API, so skill and QA retrieval uses a local sentence-transformers model instead:
+```
+pip install -e ".[claude]"
+```
+```python
+voyager = Voyager(
+    azure_login=azure_login,
+    llm_backend="claude_cli",
+    # token-efficient setup: sonnet only where reasoning matters, haiku for the rest
+    action_agent_model_name="sonnet",
+    curriculum_agent_model_name="sonnet",
+    critic_agent_model_name="haiku",
+    curriculum_agent_qa_model_name="haiku",
+    skill_manager_model_name="haiku",
+)
+```
+Unset model names fall back to `gpt-4` → `sonnet` and `gpt-3.5-turbo` → `haiku`. Switch the action agent to `opus` if it keeps failing tasks. Token usage is printed after every call, with running totals.
+Each call runs `claude -p` with tools disabled, so it only returns text. The CLI does not expose temperature. Vector databases built with OpenAI embeddings are not compatible with this backend, so start from a fresh `ckpt_dir`; to reuse an existing checkpoint or one of the provided skill libraries, delete its `skill/vectordb` (and `curriculum/vectordb`) folder and Voyager will re-index it locally on startup.
+
 # FAQ
 If you have any questions, please check our [FAQ](FAQ.md) first before opening an issue.
 

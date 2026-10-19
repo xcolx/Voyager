@@ -1,12 +1,11 @@
 import os
 import pathlib
-import pkg_resources
 from setuptools import setup, find_packages
 
 
 PKG_NAME = "voyager"
 VERSION = "0.1"
-EXTRAS = {}
+EXTRAS = {"claude": ["sentence-transformers"]}
 
 
 def _read_file(fname):
@@ -19,7 +18,9 @@ def _read_file(fname):
 def _read_install_requires():
     with pathlib.Path("requirements.txt").open() as fp:
         return [
-            str(requirement) for requirement in pkg_resources.parse_requirements(fp)
+            line.strip()
+            for line in fp
+            if line.strip() and not line.strip().startswith("#")
         ]
 
 
