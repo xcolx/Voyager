@@ -37,6 +37,7 @@ class CriticAgent:
         equipment = events[-1][1]["status"]["equipment"]
         inventory_used = events[-1][1]["status"]["inventoryUsed"]
         inventory = events[-1][1]["inventory"]
+        stations = events[-1][1]["status"].get("stations") or {}
 
         for i, (event_type, event) in enumerate(events):
             if event_type == "onError":
@@ -60,6 +61,11 @@ class CriticAgent:
         observation += f"Position: x={position['x']:.1f}, y={position['y']:.1f}, z={position['z']:.1f}\n\n"
 
         observation += f"Equipment: {equipment}\n\n"
+
+        placed = ", ".join(
+            f"{k} ({v} blocks away)" for k, v in stations.items() if v is not None
+        )
+        observation += f"Placed stations nearby: {placed or 'None'}\n\n"
 
         if inventory:
             observation += f"Inventory ({inventory_used}/36): {inventory}\n\n"

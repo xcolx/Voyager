@@ -99,9 +99,27 @@ voyager.learn()
 * If you are running with `Azure Login` for the first time, it will ask you to follow the command line instruction to generate a config file.
 * For `Azure Login`, you also need to select the world and open the world to LAN by yourself. After you run `voyager.learn()` the game will pop up soon, you need to:
   1. Select `Singleplayer` and press `Create New World`.
-  2. Set Game Mode to `Creative` and Difficulty to `Peaceful`.
-  3. After the world is created, press `Esc` key and press `Open to LAN`.
-  4. Select `Allow cheats: ON` and press `Start LAN World`. You will see the bot join the world soon. 
+  2. Set Game Mode to `Survival` and pick a Difficulty (`Easy` is a good start, `Peaceful` has no hostile mobs and no hunger).
+  3. Optional: under `Game Rules`, turn on `Keep inventory after death` so a death does not lose the bot's items.
+  4. After the world is created, press `Esc` key and press `Open to LAN`.
+  5. Select `Allow cheats: ON` and press `Start LAN World`. You will see the bot join the world soon. 
+
+## Survival rules
+
+The bot plays by normal survival rules. The only command it sends is `/pause`, which pauses the server while the LLM writes code. It never teleports, changes the time, kills itself or spawns items:
+
+* Day and night follow the world's own cycle, and time only advances while code is running.
+* Difficulty and game rules such as `keepInventory` come from the world settings, not from the bot.
+* When the bot dies, the step is stopped, the death is shown to the action agent and the curriculum, and the task counts as failed.
+* When the bot gets stuck, it digs itself out and replans. If that does not help, the code gets a "stuck" error instead of the bot being moved.
+* Generated code that runs longer than `env_step_timeout` seconds (by default `env_request_timeout - 60`) is stopped.
+* While code runs, the bot eats when hungry, swims up when it runs out of air, and hits back at hostile mobs that attack it.
+* When mineflayer crashes or the bot gets kicked, Voyager rejoins. The server keeps the bot's inventory and position, so nothing needs to be restored.
+* Placed crafting tables and furnaces stay in the world. `craftItem` and `smeltItem` reuse any within 32 blocks.
+
+To start from an empty inventory, create a new world. Voyager never wipes the bot in place.
+
+Worlds used with older versions of Voyager still have the game rules the bot used to set. Run `/gamerule doDaylightCycle true` once to turn the day/night cycle back on, and decide whether you want `keepInventory` to stay `true`.
 
 # Resume from a checkpoint during learning
 

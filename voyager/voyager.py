@@ -7,6 +7,7 @@ from typing import Dict
 
 import voyager.utils as U
 from .env import VoyagerEnv
+from .env.bridge import EnvError
 
 from .agents import ActionAgent
 from .agents import CriticAgent
@@ -25,6 +26,8 @@ class Voyager:
         llm_backend: str = "openai",
         env_wait_ticks: int = 20,
         env_request_timeout: int = 600,
+        env_step_timeout: int = None,
+        max_llm_failures: int = 5,
         max_iterations: int = 160,
         reset_placed_if_failed: bool = False,
         action_agent_model_name: str = "gpt-4",
@@ -67,6 +70,9 @@ class Voyager:
         you should increase this value
         :param env_request_timeout: how many seconds to wait for each step, if the code execution exceeds this time,
         python side will terminate the connection and need to be resumed
+        :param env_step_timeout: how many seconds generated code may run before mineflayer aborts it,
+        defaults to env_request_timeout - 60
+        :param max_llm_failures: how many consecutive LLM failures to tolerate before giving up
         :param reset_placed_if_failed: whether to reset placed blocks if failed, useful for building task
         :param action_agent_model_name: action agent model name
         :param action_agent_temperature: action agent temperature
@@ -110,10 +116,12 @@ class Voyager:
             azure_login=azure_login,
             server_port=server_port,
             request_timeout=env_request_timeout,
+            step_timeout=env_step_timeout,
         )
         self.env_wait_ticks = env_wait_ticks
         self.reset_placed_if_failed = reset_placed_if_failed
         self.max_iterations = max_iterations
+        self.max_llm_failures = max_llm_failures
 
         # set openai api key
         if openai_api_key:
@@ -182,14 +190,8 @@ class Voyager:
                     "wait_ticks": self.env_wait_ticks,
                 }
             )
-        difficulty = (
-            "easy" if len(self.curriculum_agent.completed_tasks) > 15 else "peaceful"
-        )
-        # step to peek an observation
-        events = self.env.step(
-            "bot.chat(`/time set ${getNextTime()}`);\n"
-            + f"bot.chat('/difficulty {difficulty}');"
-        )
+        # step to peek an observation, time of day and difficulty are left to the world
+        events = self.env.step("")
         skills = self.skill_manager.retrieve_skills(query=self.context)
         print(
             f"\033[33mRender Action Agent system message with {len(skills)} skills\033[0m"
@@ -226,6 +228,7 @@ class Voyager:
                 programs=self.skill_manager.programs,
             )
             self.recorder.record(events, self.task)
+            self.curriculum_agent.update_deaths(events)
             self.action_agent.update_chest_memory(events[-1][1]["nearbyChests"])
             success, critique = self.critic_agent.check_task_success(
                 events=events,
@@ -301,35 +304,47 @@ class Voyager:
                 break
         return messages, reward, done, info
 
+    def _recover_env(self, retries=3):
+        # rejoin with a fresh mineflayer, the server keeps inventory, equipment and position
+        for i in range(retries):
+            try:
+                self.last_events = self.env.reset(
+                    options={"wait_ticks": self.env_wait_ticks}
+                )
+                return
+            except EnvError as e:
+                if i == retries - 1:
+                    raise
+                print(f"\033[31mRejoining failed ({e}), retrying\033[0m")
+                time.sleep(5 * (i + 1))
+
+    def _on_agent_failure(self, e, failures):
+        # LLM or parsing errors do not touch the world, back off and try again
+        failures += 1
+        print(f"\033[41mAgent failed ({failures}/{self.max_llm_failures}): {e}\033[0m")
+        traceback.print_exc()
+        if failures >= self.max_llm_failures:
+            raise RuntimeError(f"Giving up after {failures} agent failures in a row") from e
+        time.sleep(30 * failures)
+        return failures
+
     def learn(self, reset_env=True):
-        if self.resume:
-            # keep the inventory
-            self.env.reset(
-                options={
-                    "mode": "soft",
-                    "wait_ticks": self.env_wait_ticks,
-                }
-            )
-        else:
-            # clear the inventory
-            self.env.reset(
-                options={
-                    "mode": "hard",
-                    "wait_ticks": self.env_wait_ticks,
-                }
-            )
-            self.resume = True
-        self.last_events = self.env.step("")
+        self._recover_env()
+        agent_failures = 0
 
         while True:
             if self.recorder.iteration > self.max_iterations:
                 print("Iteration limit reached")
                 break
-            task, context = self.curriculum_agent.propose_next_task(
-                events=self.last_events,
-                chest_observation=self.action_agent.render_chest_observation(),
-                max_retries=5,
-            )
+            try:
+                task, context = self.curriculum_agent.propose_next_task(
+                    events=self.last_events,
+                    chest_observation=self.action_agent.render_chest_observation(),
+                    max_retries=5,
+                )
+            except Exception as e:
+                agent_failures = self._on_agent_failure(e, agent_failures)
+                continue
             print(
                 f"\033[35mStarting task {task} for at most {self.action_agent_task_max_retries} times\033[0m"
             )
@@ -339,26 +354,21 @@ class Voyager:
                     context=context,
                     reset_env=reset_env,
                 )
-            except Exception as e:
-                time.sleep(3)  # wait for mineflayer to exit
-                info = {
-                    "task": task,
-                    "success": False,
-                }
-                # reset bot status here
-                self.last_events = self.env.reset(
-                    options={
-                        "mode": "hard",
-                        "wait_ticks": self.env_wait_ticks,
-                        "inventory": self.last_events[-1][1]["inventory"],
-                        "equipment": self.last_events[-1][1]["status"]["equipment"],
-                        "position": self.last_events[-1][1]["status"]["position"],
-                    }
-                )
+            except EnvError as e:
                 # use red color background to print the error
                 print("Your last round rollout terminated due to error:")
                 print(f"\033[41m{e}\033[0m")
                 traceback.print_exc()
+                info = {
+                    "task": task,
+                    "success": False,
+                }
+                self._recover_env()
+            except Exception as e:
+                # the task is not counted as failed, the bot never got a fair try
+                agent_failures = self._on_agent_failure(e, agent_failures)
+                continue
+            agent_failures = 0
 
             if info["success"]:
                 self.skill_manager.add_new_skill(info)
@@ -379,15 +389,14 @@ class Voyager:
 
     def decompose_task(self, task):
         if not self.last_events:
-            self.last_events = self.env.reset(
-                options={
-                    "mode": "hard",
-                    "wait_ticks": self.env_wait_ticks,
-                }
-            )
+            self._recover_env()
         return self.curriculum_agent.decompose_task(task, self.last_events)
 
-    def inference(self, task=None, sub_goals=[], reset_mode="hard", reset_env=True):
+    def inference(self, task=None, sub_goals=[], reset_mode="soft", reset_env=True):
+        """
+        Run in a new world to start from an empty inventory, the bot is never wiped in place.
+        reset_mode is kept for compatibility, a "hard" reset is no longer supported.
+        """
         if not task and not sub_goals:
             raise ValueError("Either task or sub_goals must be provided")
         if not sub_goals:

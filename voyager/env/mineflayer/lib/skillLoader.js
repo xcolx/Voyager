@@ -60,6 +60,10 @@ function inject(bot) {
 
     bot._chat = bot.chat;
     bot.chat = (message) => {
+        // generated code plays by survival rules, only the env itself sends commands through bot._chat
+        if (String(message).startsWith("/")) {
+            throw new Error(`Chat commands are not allowed: ${message}`);
+        }
         // action_count.chat++;
         bot.emit("chatEvent", "bot", message);
         bot._chat(message);
@@ -72,6 +76,29 @@ function inject(bot) {
 
     bot.save = function (eventName) {
         bot.emit("save", eventName);
+    };
+
+    // the pathfinder does not expose its goal, the unstuck logic needs it to replan
+    const setGoal = bot.pathfinder.setGoal;
+    bot.pathfinder.setGoal = (goal, dynamic = false) => {
+        bot.pathfinder.currentGoal = goal;
+        bot.pathfinder.currentDynamic = dynamic;
+        setGoal(goal, dynamic);
+    };
+
+    // when the unstuck logic gives up, report why instead of "The goal was changed"
+    const goto = bot.pathfinder.goto;
+    bot.pathfinder.goto = async (goal) => {
+        try {
+            return await goto(goal);
+        } catch (err) {
+            if (bot.stuckGaveUp) {
+                const message = bot.stuckGaveUp;
+                bot.stuckGaveUp = null;
+                throw new Error(message);
+            }
+            throw err;
+        }
     };
 }
 

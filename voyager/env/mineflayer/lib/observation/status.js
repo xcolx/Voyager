@@ -31,6 +31,7 @@ class Status extends Observation {
             entities: this.getEntities(),
             timeOfDay: this.getTime(),
             inventoryUsed: this.bot.inventoryUsed(),
+            stations: this.getStations(),
             elapsedTime: this.bot.globalTickCounter,
         };
     }
@@ -59,6 +60,21 @@ class Status extends Observation {
             time = "sunrise";
         }
         return time;
+    }
+
+    // placed crafting tables and furnaces stay in the world, report how far the nearest ones are
+    getStations() {
+        const stations = {};
+        for (const name of ["crafting_table", "furnace"]) {
+            const block = this.bot.findBlock({
+                matching: this.bot.registry.blocksByName[name].id,
+                maxDistance: 32,
+            });
+            stations[name] = block
+                ? Math.round(block.position.distanceTo(this.bot.entity.position))
+                : null;
+        }
+        return stations;
     }
 
     // For each item in equipment, if it exists, return the name of the item

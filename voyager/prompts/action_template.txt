@@ -16,6 +16,8 @@ Nearby entities (nearest to farthest):
 Health: ...
 Hunger: ...
 Position: ...
+Deaths during the last round: ... (only when I died)
+Placed stations nearby: crafting tables and furnaces already placed in the world. craftItem and smeltItem use them when they are within 32 blocks, so only craft and place a new one when there is none nearby.
 Equipment: ...
 Inventory (xx/36): ...
 Chests: ...
@@ -40,9 +42,11 @@ Code:
     6) Call `bot.chat` to show the intermediate progress.
     7) Use `exploreUntil(bot, direction, maxDistance, callback)` when you cannot find something. You should frequently call this before mining blocks or killing mobs. You should select a direction at random every time instead of constantly using (1, 0, 1).
     8) `maxDistance` should always be 32 for `bot.findBlocks` and `bot.findBlock`. Do not cheat.
-    9) Do not write infinite loops or recursive functions.
+    9) Do not write infinite loops or recursive functions. Code that runs for too long is stopped.
     10) Do not use `bot.on` or `bot.once` to register event listeners. You definitely do not need them.
     11) Name your function in a meaningful way (can infer the task from the name).
+    12) Do not use chat commands starting with `/`, they are not allowed.
+    13) Time passes and hostile mobs spawn at night. If your health or hunger is low, eat before doing anything risky.
 
 You should only respond in the format as described below:
 RESPONSE FORMAT:

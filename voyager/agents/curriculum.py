@@ -44,6 +44,7 @@ class CurriculumAgent:
         ], f"mode {mode} not supported"
         self.mode = mode
         self.ckpt_dir = ckpt_dir
+        self.recent_deaths = []
         U.f_mkdir(f"{ckpt_dir}/curriculum/vectordb")
         if resume:
             print(f"\033[35mLoading Curriculum Agent from {ckpt_dir}/curriculum\033[0m")
@@ -105,6 +106,7 @@ class CurriculumAgent:
             "nearby_entities": 5,
             "health": 15,
             "hunger": 15,
+            "deaths": 0,
             "position": 0,
             "equipment": 0,
             "inventory": 0,
@@ -125,6 +127,7 @@ class CurriculumAgent:
             "nearby_entities",
             "health",
             "hunger",
+            "deaths",
             "position",
             "equipment",
             "inventory",
@@ -132,6 +135,16 @@ class CurriculumAgent:
             "completed_tasks",
             "failed_tasks",
         ]
+
+    def update_deaths(self, events):
+        # keep the last few deaths so the curriculum can propose food, armor or shelter
+        for event_type, event in events:
+            if event_type == "onDeath":
+                death = event["onDeath"]
+                self.recent_deaths.append(
+                    f"{death['message']} at x={death['position']['x']}, y={death['position']['y']}, z={death['position']['z']}"
+                )
+        self.recent_deaths = self.recent_deaths[-3:]
 
     @property
     def progress(self):
@@ -203,6 +216,9 @@ class CurriculumAgent:
             "nearby_entities": f"Nearby entities: {nearby_entities}\n\n",
             "health": f"Health: {health:.1f}/20\n\n",
             "hunger": f"Hunger: {hunger:.1f}/20\n\n",
+            "deaths": f"Recent deaths: {'; '.join(self.recent_deaths)}\n\n"
+            if self.recent_deaths
+            else "",
             "position": f"Position: x={position['x']:.1f}, y={position['y']:.1f}, z={position['z']:.1f}\n\n",
             "equipment": f"Equipment: {equipment}\n\n",
             "inventory": f"Inventory ({inventory_used}/36): {inventory if inventory else 'Empty'}\n\n",

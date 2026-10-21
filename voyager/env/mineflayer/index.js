@@ -4,7 +4,7 @@ const bodyParser = require("body-parser");
 const mineflayer = require("mineflayer");
 
 const skills = require("./lib/skillLoader");
-const { initCounter, getNextTime } = require("./lib/utils");
+const reflexes = require("./lib/reflexes");
 const obs = require("./lib/observation/base");
 const OnChat = require("./lib/observation/onChat");
 const OnError = require("./lib/observation/onError");
@@ -12,6 +12,7 @@ const { Voxels, BlockRecords } = require("./lib/observation/voxels");
 const Status = require("./lib/observation/status");
 const Inventory = require("./lib/observation/inventory");
 const OnSave = require("./lib/observation/onSave");
+const OnDeath = require("./lib/observation/onDeath");
 const Chests = require("./lib/observation/chests");
 const { plugin: tool } = require("mineflayer-tool");
 
@@ -48,10 +49,11 @@ app.post("/start", (req, res) => {
 
     // Event subscriptions
     bot.waitTicks = req.body.waitTicks;
+    // seconds a step may run before it is aborted
+    bot.stepTimeout = req.body.stepTimeout || 480;
     bot.globalTickCounter = 0;
     bot.stuckTickCounter = 0;
     bot.stuckPosList = [];
-    bot.iron_pickaxe = false;
 
     bot.on("kicked", onDisconnect);
     // after a kick or a lost connection every pending request would wait forever,
@@ -72,59 +74,40 @@ app.post("/start", (req, res) => {
 
     bot.once("spawn", async () => {
         bot.removeListener("error", onConnectionFailed);
-        let itemTicks = 1;
         if (req.body.unpause) {
             // the previous bot left the server paused
             bot.chat("/pause");
         }
-        if (req.body.reset === "hard") {
-            bot.chat("/clear @s");
-            bot.chat("/kill @s");
-            const inventory = req.body.inventory ? req.body.inventory : {};
-            const equipment = req.body.equipment
-                ? req.body.equipment
-                : [null, null, null, null, null, null];
-            for (let key in inventory) {
-                bot.chat(`/give @s minecraft:${key} ${inventory[key]}`);
-                itemTicks += 1;
-            }
-            const equipmentNames = [
-                "armor.head",
-                "armor.chest",
-                "armor.legs",
-                "armor.feet",
-                "weapon.mainhand",
-                "weapon.offhand",
-            ];
-            for (let i = 0; i < 6; i++) {
-                if (i === 4) continue;
-                if (equipment[i]) {
-                    bot.chat(
-                        `/item replace entity @s ${equipmentNames[i]} with minecraft:${equipment[i]}`
-                    );
-                    itemTicks += 1;
-                }
-            }
-        }
-
-        if (req.body.position) {
-            bot.chat(
-                `/tp @s ${req.body.position.x} ${req.body.position.y} ${req.body.position.z}`
-            );
-        }
-
-        // if iron_pickaxe is in bot's inventory
-        if (
-            bot.inventory.items().find((item) => item.name === "iron_pickaxe")
-        ) {
-            bot.iron_pickaxe = true;
-        }
+        // the server keeps inventory, equipment and position across a rejoin, so nothing is restored here
 
         // mineflayer 4.8.1 sends window_click changedSlots as bare slot numbers, which the
         // installed protocol cannot serialize; newer mineflayer maps them to {location, item}
         const Item = require("prismarine-item")(bot.registry);
         const write = bot._client.write.bind(bot._client);
+        let lastValidPosition = bot.entity.position.clone();
         bot._client.write = (name, params) => {
+            // physics occasionally produces NaN, and the server kicks for invalid_player_movement;
+            // drop the packet and put the bot back at its last valid position instead
+            if (["position", "position_look", "look"].includes(name)) {
+                const values = ["x", "y", "z", "yaw", "pitch"]
+                    .filter((key) => key in params)
+                    .map((key) => params[key]);
+                if (!values.every(Number.isFinite)) {
+                    console.log(`Dropped invalid ${name} packet: ${JSON.stringify(params)}`);
+                    bot.entity.position.set(
+                        lastValidPosition.x,
+                        lastValidPosition.y,
+                        lastValidPosition.z
+                    );
+                    bot.entity.velocity.set(0, 0, 0);
+                    if (!Number.isFinite(bot.entity.yaw)) bot.entity.yaw = 0;
+                    if (!Number.isFinite(bot.entity.pitch)) bot.entity.pitch = 0;
+                    return;
+                }
+                if ("x" in params) {
+                    lastValidPosition.set(params.x, params.y, params.z);
+                }
+            }
             if (name === "window_click" && Array.isArray(params.changedSlots)) {
                 const window = bot.currentWindow || bot.inventory;
                 params.changedSlots = params.changedSlots.map((slot) =>
@@ -157,22 +140,14 @@ app.post("/start", (req, res) => {
             Status,
             Inventory,
             OnSave,
+            OnDeath,
             Chests,
             BlockRecords,
         ]);
         skills.inject(bot);
 
-        if (req.body.spread) {
-            bot.chat(`/spreadplayers ~ ~ 0 300 under 80 false @s`);
-            await bot.waitForTicks(bot.waitTicks);
-        }
-
-        await bot.waitForTicks(bot.waitTicks * itemTicks);
+        await bot.waitForTicks(bot.waitTicks);
         res.json(bot.observe());
-
-        initCounter(bot);
-        bot.chat("/gamerule keepInventory true");
-        bot.chat("/gamerule doDaylightCycle false");
     });
 
     function onConnectionFailed(e) {
@@ -204,6 +179,8 @@ app.post("/step", async (req, res) => {
         bot.waitForTicks(bot.waitTicks).then(() => {
             if (!response_sent) {
                 response_sent = true;
+                // the code may still be running, so start the next step from a fresh mineflayer
+                res.set("X-Voyager-Restart", "1");
                 res.json(bot.observe());
             }
         });
@@ -256,6 +233,34 @@ app.post("/step", async (req, res) => {
     bot.globalTickCounter = 0;
     bot.stuckTickCounter = 0;
     bot.stuckPosList = [];
+    bot.unstuckAttempts = 0;
+    bot.stuckGaveUp = null;
+
+    // the step is aborted on timeout or death; the generated code may still be running afterwards,
+    // so the response asks Python to restart mineflayer (rejoin) before the next step
+    let abortStep;
+    const stepAborted = new Promise((resolve) => {
+        abortStep = (message) => {
+            const err = new Error(message);
+            err.voyagerAbort = true;
+            resolve(err);
+        };
+    });
+    const deadline = setTimeout(
+        () =>
+            abortStep(
+                `Your code ran for more than ${bot.stepTimeout} seconds and was stopped. ` +
+                    "Avoid long loops and split the task into smaller steps."
+            ),
+        bot.stepTimeout * 1000
+    );
+    function onDeath(death) {
+        abortStep(
+            `You died: ${death.message}, at x=${death.position.x}, y=${death.position.y}, z=${death.position.z}. ` +
+                "You respawned and the code was stopped. Items you carried may have dropped where you died."
+        );
+    }
+    bot.once("voyagerDeath", onDeath);
 
     function onTick() {
         bot.globalTickCounter++;
@@ -269,6 +274,7 @@ app.post("/step", async (req, res) => {
     }
 
     bot.on("physicTick", onTick);
+    const stopReflexes = reflexes.start(bot);
 
     // initialize fail count
     let _craftItemFailCount = 0;
@@ -282,19 +288,37 @@ app.post("/step", async (req, res) => {
     const programs = req.body.programs;
     bot.cumulativeObs = [];
     await bot.waitForTicks(bot.waitTicks);
-    const r = await evaluateCode(code, programs);
+    const r = await Promise.race([evaluateCode(code, programs), stepAborted]);
+    const aborted = r instanceof Error && r.voyagerAbort;
+    clearTimeout(deadline);
+    stopReflexes();
+    bot.removeListener("voyagerDeath", onDeath);
     process.off("uncaughtException", otherError);
-    if (r !== "success") {
+    if (aborted) {
+        stopActions();
+        bot.emit("error", r.message);
+    } else if (r !== "success") {
         bot.emit("error", handleError(r));
     }
-    await returnItems();
     // wait for last message
     await bot.waitForTicks(bot.waitTicks);
     if (!response_sent) {
         response_sent = true;
+        if (aborted) res.set("X-Voyager-Restart", "1");
         res.json(bot.observe());
     }
     bot.removeListener("physicTick", onTick);
+
+    function stopActions() {
+        try {
+            bot.pathfinder.setGoal(null);
+            bot.pvp?.stop();
+            bot.stopDigging();
+        } catch (err) {
+            console.log(`Failed to stop actions: ${err}`);
+        }
+        bot.clearControlStates();
+    }
 
     async function evaluateCode(code, programs) {
         // Echo the code produced for players to see it. Don't echo when the bot code is already producing dialog or it will double echo
@@ -307,7 +331,7 @@ app.post("/step", async (req, res) => {
     }
 
     function onStuck(posThreshold) {
-        const currentPos = bot.entity.position;
+        const currentPos = bot.entity.position.clone();
         bot.stuckPosList.push(currentPos);
 
         // Check if the list is full
@@ -316,7 +340,9 @@ app.post("/step", async (req, res) => {
             const posDifference = currentPos.distanceTo(oldestPos);
 
             if (posDifference < posThreshold) {
-                teleportBot(); // execute the function
+                unstuck();
+            } else {
+                bot.unstuckAttempts = 0;
             }
 
             // Remove the oldest time from the list
@@ -324,61 +350,55 @@ app.post("/step", async (req, res) => {
         }
     }
 
-    function teleportBot() {
-        const blocks = bot.findBlocks({
-            matching: (block) => {
-                return block.type === 0;
-            },
-            maxDistance: 1,
-            count: 27,
-        });
-
-        if (blocks) {
-            // console.log(blocks.length);
-            const randomIndex = Math.floor(Math.random() * blocks.length);
-            const block = blocks[randomIndex];
-            bot.chat(`/tp @s ${block.x} ${block.y} ${block.z}`);
-        } else {
-            bot.chat("/tp @s ~ ~1.25 ~");
+    // escalate: dig out and hop while replanning, then give up on the goal so the code sees an error
+    async function unstuck() {
+        if (bot.unstucking) return;
+        bot.unstucking = true;
+        bot.unstuckAttempts++;
+        const pos = bot.entity.position.floored();
+        console.log(`Stuck at ${pos}, attempt ${bot.unstuckAttempts}`);
+        try {
+            const goal = bot.pathfinder.currentGoal;
+            if (bot.unstuckAttempts <= 2 && goal) {
+                await digOut(pos);
+                // setting the same goal again keeps goto() pending but forces a new path
+                bot.pathfinder.setGoal(goal, bot.pathfinder.currentDynamic);
+                const directions = ["forward", "back", "left", "right"];
+                const direction =
+                    directions[Math.floor(Math.random() * directions.length)];
+                bot.setControlState("jump", true);
+                bot.setControlState(direction, true);
+                await bot.waitForTicks(8);
+                bot.setControlState("jump", false);
+                bot.setControlState(direction, false);
+            } else {
+                bot.unstuckAttempts = 0;
+                bot.stuckGaveUp =
+                    `I got stuck at x=${pos.x}, y=${pos.y}, z=${pos.z} and could not reach my goal. ` +
+                    "Try a different direction, or dig or pillar out of the spot first.";
+                bot.chat(bot.stuckGaveUp);
+                bot.pathfinder.setGoal(null);
+            }
+        } catch (err) {
+            console.log(`Failed to get unstuck: ${err}`);
+        } finally {
+            bot.unstucking = false;
         }
     }
 
-    function returnItems() {
-        bot.chat("/gamerule doTileDrops false");
-        const crafting_table = bot.findBlock({
-            matching: mcData.blocksByName.crafting_table.id,
-            maxDistance: 128,
-        });
-        if (crafting_table) {
-            bot.chat(
-                `/setblock ${crafting_table.position.x} ${crafting_table.position.y} ${crafting_table.position.z} air destroy`
-            );
-            bot.chat("/give @s crafting_table");
-        }
-        const furnace = bot.findBlock({
-            matching: mcData.blocksByName.furnace.id,
-            maxDistance: 128,
-        });
-        if (furnace) {
-            bot.chat(
-                `/setblock ${furnace.position.x} ${furnace.position.y} ${furnace.position.z} air destroy`
-            );
-            bot.chat("/give @s furnace");
-        }
-        if (bot.inventoryUsed() >= 32) {
-            // if chest is not in bot's inventory
-            if (!bot.inventory.items().find((item) => item.name === "chest")) {
-                bot.chat("/give @s chest");
+    // break solid blocks the bot is wedged in, at its feet and head and right above
+    async function digOut(pos) {
+        for (const dy of [0, 1, 2]) {
+            const block = bot.blockAt(pos.offset(0, dy, 0));
+            if (
+                block &&
+                block.boundingBox === "block" &&
+                block.diggable &&
+                bot.canDigBlock(block)
+            ) {
+                await bot.dig(block, true);
             }
         }
-        // if iron_pickaxe not in bot's inventory and bot.iron_pickaxe
-        if (
-            bot.iron_pickaxe &&
-            !bot.inventory.items().find((item) => item.name === "iron_pickaxe")
-        ) {
-            bot.chat("/give @s iron_pickaxe");
-        }
-        bot.chat("/gamerule doTileDrops true");
     }
 
     function handleError(err) {
@@ -456,7 +476,8 @@ app.post("/pause", (req, res) => {
         res.status(400).json({ error: "Bot not spawned" });
         return;
     }
-    bot.chat("/pause");
+    // bot.chat refuses commands once the skills are injected
+    (bot._chat || bot.chat)("/pause");
     // a disconnect stops ticks, so also answer when the bot ends
     const ended = new Promise((resolve) => bot.once("end", resolve));
     Promise.race([bot.waitForTicks(bot.waitTicks), ended]).then(() => {

@@ -78,12 +78,15 @@ async function moveToChest(bot, chestPosition) {
         );
     }
     if (chestPosition.distanceTo(bot.entity.position) > 32) {
-        bot.chat(
-            `/tp ${chestPosition.x} ${chestPosition.y} ${chestPosition.z}`
+        // walk close enough for the chest's chunk to be loaded
+        await bot.pathfinder.goto(
+            new GoalNear(chestPosition.x, chestPosition.y, chestPosition.z, 16)
         );
-        await bot.waitForTicks(20);
     }
     const chestBlock = bot.blockAt(chestPosition);
+    if (!chestBlock) {
+        throw new Error(`The chest at ${chestPosition} is too far away to see`);
+    }
     if (chestBlock.name !== "chest") {
         bot.emit("removeChest", chestPosition);
         throw new Error(

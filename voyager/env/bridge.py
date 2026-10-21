@@ -15,6 +15,11 @@ from .minecraft_launcher import MinecraftInstance
 from .process_monitor import SubprocessMonitor
 
 
+class EnvError(RuntimeError):
+    """The Minecraft side failed (mineflayer crashed, the bot got kicked, a request timed out).
+    Recover with a soft reset, which rejoins without touching the world."""
+
+
 class VoyagerEnv(gym.Env):
     def __init__(
         self,
@@ -23,6 +28,7 @@ class VoyagerEnv(gym.Env):
         server_host="http://127.0.0.1",
         server_port=3000,
         request_timeout=600,
+        step_timeout=None,
         log_path="./logs",
     ):
         if not mc_port and not azure_login:
@@ -36,6 +42,8 @@ class VoyagerEnv(gym.Env):
         self.server = f"{server_host}:{server_port}"
         self.server_port = server_port
         self.request_timeout = request_timeout
+        # abort generated code inside mineflayer before the http request itself times out
+        self.step_timeout = step_timeout or max(request_timeout - 60, request_timeout // 2)
         self.log_path = log_path
         self.mineflayer = self.get_mineflayer_process(server_port)
         if azure_login:
@@ -87,7 +95,7 @@ class VoyagerEnv(gym.Env):
             if not self.mineflayer.is_running:
                 retry += 1
                 if retry > 3:
-                    raise RuntimeError("Mineflayer process failed to start")
+                    raise EnvError("Mineflayer process failed to start")
                 else:
                     continue
             print(self.mineflayer.ready_line)
@@ -102,7 +110,7 @@ class VoyagerEnv(gym.Env):
                 # the bot got disconnected while joining, mineflayer exits and is restarted
                 retry += 1
                 if retry > 3:
-                    raise
+                    raise EnvError(f"Bot failed to join: {e}") from e
                 print(f"Bot failed to join ({e}), retrying")
                 self.mineflayer.stop()
                 continue
@@ -110,9 +118,7 @@ class VoyagerEnv(gym.Env):
                 self.server_paused = False
             else:
                 self.mineflayer.stop()
-                raise RuntimeError(
-                    f"Minecraft server reply with code {res.status_code}"
-                )
+                raise EnvError(f"Minecraft server reply with code {res.status_code}")
             return res.json()
 
     def step(
@@ -122,20 +128,30 @@ class VoyagerEnv(gym.Env):
     ) -> Tuple[ObsType, SupportsFloat, bool, bool, Dict[str, Any]]:
         if not self.has_reset:
             raise RuntimeError("Environment has not been reset yet")
-        self.check_process()
-        self.unpause()
-        data = {
-            "code": code,
-            "programs": programs,
-        }
-        res = requests.post(
-            f"{self.server}/step", json=data, timeout=self.request_timeout
-        )
-        if res.status_code != 200:
-            raise RuntimeError("Failed to step Minecraft server")
-        returned_data = res.json()
+        try:
+            self.check_process()
+            self.unpause()
+            res = requests.post(
+                f"{self.server}/step",
+                json={"code": code, "programs": programs},
+                timeout=self.request_timeout,
+            )
+            if res.status_code != 200:
+                raise EnvError(f"Failed to step Minecraft server: {res.status_code}")
+            events = json.loads(res.json())
+        except requests.exceptions.RequestException as e:
+            # the bot got disconnected or the code blocked mineflayer, restart it on the next step
+            if isinstance(e, requests.exceptions.ConnectionError):
+                self.mineflayer.wait_for_exit(timeout=10)
+            else:
+                self.mineflayer.stop()
+            raise EnvError(f"Mineflayer request failed: {e}") from e
         self.pause()
-        return json.loads(returned_data)
+        if res.headers.get("X-Voyager-Restart"):
+            # the step was aborted and its code may still run, rejoin with a fresh mineflayer
+            print("Step was aborted, restarting mineflayer")
+            self.mineflayer.stop()
+        return events
 
     def render(self):
         raise NotImplementedError("render is not implemented")
@@ -149,17 +165,19 @@ class VoyagerEnv(gym.Env):
         if options is None:
             options = {}
 
-        if options.get("inventory", {}) and options.get("mode", "hard") != "hard":
-            raise RuntimeError("inventory can only be set when options is hard")
+        for key in ["inventory", "equipment", "position", "spread"]:
+            if options.get(key):
+                warnings.warn(f"reset option {key} is no longer supported and ignored")
+        if options.get("mode", "soft") == "hard":
+            warnings.warn(
+                "hard reset is no longer supported, start from a new world instead. Doing a soft reset"
+            )
 
+        # a reset only rejoins, the server keeps inventory, equipment and position
         self.reset_options = {
             "port": self.mc_port,
-            "reset": options.get("mode", "hard"),
-            "inventory": options.get("inventory", {}),
-            "equipment": options.get("equipment", []),
-            "spread": options.get("spread", False),
             "waitTicks": options.get("wait_ticks", 5),
-            "position": options.get("position", None),
+            "stepTimeout": self.step_timeout,
         }
 
         self.unpause()
@@ -169,8 +187,6 @@ class VoyagerEnv(gym.Env):
         returned_data = self.check_process()
         self.has_reset = True
         self.connected = True
-        # All the reset in step will be soft
-        self.reset_options["reset"] = "soft"
         self.pause()
         return json.loads(returned_data)
 

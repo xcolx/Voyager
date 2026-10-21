@@ -108,12 +108,18 @@ class ActionAgent:
         error_messages = []
         # FIXME: damage_messages is not used
         damage_messages = []
+        death_messages = []
         assert events[-1][0] == "observe", "Last event must be observe"
         for i, (event_type, event) in enumerate(events):
             if event_type == "onChat":
                 chat_messages.append(event["onChat"])
             elif event_type == "onError":
                 error_messages.append(event["onError"])
+            elif event_type == "onDeath":
+                death = event["onDeath"]
+                death_messages.append(
+                    f"{death['message']} at x={death['position']['x']}, y={death['position']['y']}, z={death['position']['z']}"
+                )
             elif event_type == "onDamage":
                 damage_messages.append(event["onDamage"])
             elif event_type == "observe":
@@ -127,6 +133,7 @@ class ActionAgent:
                 equipment = event["status"]["equipment"]
                 inventory_used = event["status"]["inventoryUsed"]
                 inventory = event["inventory"]
+                stations = event["status"].get("stations") or {}
                 assert i == len(events) - 1, "observe must be the last event"
 
         observation = ""
@@ -172,6 +179,14 @@ class ActionAgent:
         observation += f"Hunger: {hunger:.1f}/20\n\n"
 
         observation += f"Position: x={position['x']:.1f}, y={position['y']:.1f}, z={position['z']:.1f}\n\n"
+
+        if death_messages:
+            observation += f"Deaths during the last round: {'; '.join(death_messages)}\n\n"
+
+        placed = ", ".join(
+            f"{k} ({v} blocks away)" for k, v in stations.items() if v is not None
+        )
+        observation += f"Placed stations nearby: {placed or 'None'}\n\n"
 
         observation += f"Equipment: {equipment}\n\n"
 

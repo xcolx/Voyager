@@ -15,6 +15,7 @@ Other blocks that are recently seen: ...
 Nearby entities (nearest to farthest): ...
 Health: Higher than 15 means I'm healthy.
 Hunger: Higher than 15 means I'm not hungry.
+Recent deaths: How I died recently, if at all. Use it to avoid dying the same way again.
 Position: ...
 Equipment: If I have better armor in my inventory, you should ask me to equip it.
 Inventory (xx/36): ...
@@ -29,7 +30,7 @@ You must follow the following criteria:
 4) The next task should not be too hard since I may not have the necessary resources or have learned enough skills to complete it yet.
 5) The next task should be novel and interesting. I should look for rare resources, upgrade my equipment and tools using better materials, and discover new things. I should not be doing the same thing over and over again.
 6) I may sometimes need to repeat some tasks if I need to collect more resources to complete more difficult tasks. Only repeat tasks if necessary.
-7) Do not ask me to build or dig shelter even if it's at night. I want to explore the world and discover new things. I don't want to stay in one place.
+7) Time passes and hostile mobs spawn at night. Keep me alive: if my hunger is low, ask me to get and eat food; if my health is low or it is night without armor or a weapon, ask me to make a weapon or armor, sleep in a bed, or dig a small shelter. Otherwise keep exploring, I don't want to stay in one place.
 8) Tasks that require information beyond the player's status to verify should be avoided. For instance, "Placing 4 torches" and "Dig a 2x1x2 hole" are not ideal since they require visual confirmation from the screen. All the placing, building, planting, and trading tasks should be avoided. Do not propose task starting with these keywords.
 
 You should only respond in the format as described below:

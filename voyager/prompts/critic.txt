@@ -11,6 +11,7 @@ Health: My current health.
 Hunger: My current hunger level. For eating task, if my hunger level is 20.0, then I successfully ate the food.
 Position: My current position.
 Equipment: My final equipment. For crafting tasks, I sometimes equip the crafted item.
+Placed stations nearby: Crafting tables and furnaces placed in the world. If the task is to craft a crafting table or furnace and one is placed nearby, I may have placed the crafted one.
 Inventory (xx/36): My final inventory. For mining and smelting tasks, you only need to check inventory.
 Chests: If the task requires me to place items in a chest, you can find chest information here.
 Task: The objective I need to accomplish.
