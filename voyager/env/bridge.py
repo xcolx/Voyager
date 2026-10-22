@@ -110,8 +110,8 @@ class VoyagerEnv(gym.Env):
                 # the bot got disconnected while joining, mineflayer exits and is restarted
                 retry += 1
                 if retry > 3:
-                    raise EnvError(f"Bot failed to join: {e}") from e
-                print(f"Bot failed to join ({e}), retrying")
+                    raise EnvError(f"Bot failed to join: {e}{self._paused_hint()}") from e
+                print(f"Bot failed to join ({e}), retrying{self._paused_hint()}")
                 self.mineflayer.stop()
                 continue
             if res.status_code == 200:
@@ -146,11 +146,17 @@ class VoyagerEnv(gym.Env):
             else:
                 self.mineflayer.stop()
             raise EnvError(f"Mineflayer request failed: {e}") from e
-        self.pause()
         if res.headers.get("X-Voyager-Restart"):
-            # the step was aborted and its code may still run, rejoin with a fresh mineflayer
+            # the step was aborted and its code may still run, rejoin with a fresh mineflayer.
+            # A paused server never finishes a login, so rejoin before pausing again
             print("Step was aborted, restarting mineflayer")
             self.mineflayer.stop()
+            try:
+                self.check_process()
+            except EnvError as e:
+                # the next step tries again, the server is left running
+                print(f"Rejoining after the aborted step failed: {e}")
+        self.pause()
         return events
 
     def render(self):
@@ -200,6 +206,19 @@ class VoyagerEnv(gym.Env):
             self.mc_instance.stop()
         self.mineflayer.stop()
         return not self.connected
+
+    def _paused_hint(self):
+        # a paused server does not finish logins, and no bot is left to unpause it
+        if self.server_paused:
+            return (
+                ". The Minecraft server may still be paused, type /pause in the Minecraft chat to resume it"
+            )
+        # the pause mod also pauses on its own once only paused players are left
+        return (
+            ". If the Minecraft log shows 'Saving and pausing game...', the server paused itself:"
+            " set pauseWhenAllPlayersPaused=false in config/serverpause/serverpause.conf and restart Minecraft,"
+            " or click back into your game window"
+        )
 
     def pause(self):
         if self.mineflayer.is_running and not self.server_paused:

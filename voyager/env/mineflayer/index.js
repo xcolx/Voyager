@@ -5,6 +5,7 @@ const mineflayer = require("mineflayer");
 
 const skills = require("./lib/skillLoader");
 const reflexes = require("./lib/reflexes");
+const packetGuard = require("./lib/packetGuard");
 const obs = require("./lib/observation/base");
 const OnChat = require("./lib/observation/onChat");
 const OnError = require("./lib/observation/onError");
@@ -80,44 +81,7 @@ app.post("/start", (req, res) => {
         }
         // the server keeps inventory, equipment and position across a rejoin, so nothing is restored here
 
-        // mineflayer 4.8.1 sends window_click changedSlots as bare slot numbers, which the
-        // installed protocol cannot serialize; newer mineflayer maps them to {location, item}
-        const Item = require("prismarine-item")(bot.registry);
-        const write = bot._client.write.bind(bot._client);
-        let lastValidPosition = bot.entity.position.clone();
-        bot._client.write = (name, params) => {
-            // physics occasionally produces NaN, and the server kicks for invalid_player_movement;
-            // drop the packet and put the bot back at its last valid position instead
-            if (["position", "position_look", "look"].includes(name)) {
-                const values = ["x", "y", "z", "yaw", "pitch"]
-                    .filter((key) => key in params)
-                    .map((key) => params[key]);
-                if (!values.every(Number.isFinite)) {
-                    console.log(`Dropped invalid ${name} packet: ${JSON.stringify(params)}`);
-                    bot.entity.position.set(
-                        lastValidPosition.x,
-                        lastValidPosition.y,
-                        lastValidPosition.z
-                    );
-                    bot.entity.velocity.set(0, 0, 0);
-                    if (!Number.isFinite(bot.entity.yaw)) bot.entity.yaw = 0;
-                    if (!Number.isFinite(bot.entity.pitch)) bot.entity.pitch = 0;
-                    return;
-                }
-                if ("x" in params) {
-                    lastValidPosition.set(params.x, params.y, params.z);
-                }
-            }
-            if (name === "window_click" && Array.isArray(params.changedSlots)) {
-                const window = bot.currentWindow || bot.inventory;
-                params.changedSlots = params.changedSlots.map((slot) =>
-                    typeof slot === "number"
-                        ? { location: slot, item: Item.toNotch(window.slots[slot]) }
-                        : slot
-                );
-            }
-            return write(name, params);
-        };
+        packetGuard.inject(bot);
 
         const { pathfinder } = require("mineflayer-pathfinder");
         const tool = require("mineflayer-tool").plugin;

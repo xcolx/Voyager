@@ -17,6 +17,12 @@ In this tutorial, we will install the Fabric launcher and 5 mods. Remember to us
       max_respawn_distance=32
       min_respawn_distance=0
       ```
-5. Don't forget to change the `version` in `azure_login` to `fabric-loader-0.14.18-1.19` that you are using. You can find it under `YOUR_MINECRAFT_GAME_LOCATION/version` folder.
+5. After you launch the game, go to `YOUR_MINECRAFT_GAME_LOCATION/config/serverpause/serverpause.conf` and set:
+      ```
+      pauseWhenAllPlayersPaused=false
+      pauseWhenNoPlayers=false
+      ```
+   Voyager pauses the server itself with `/pause`. With `pauseWhenAllPlayersPaused=true`, the server pauses whenever your own game window is in the pause menu or loses focus and the bot is not connected, for example while the bot rejoins after a death. A paused server does not let anyone log in, so the bot can never get back in. Restart Minecraft after changing the file.
+6. Don't forget to change the `version` in `azure_login` to `fabric-loader-0.14.18-1.19` that you are using. You can find it under `YOUR_MINECRAFT_GAME_LOCATION/version` folder.
 
 You can return to [README.md](../README.md#getting-started) and getting started now.
