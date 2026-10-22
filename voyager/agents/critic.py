@@ -1,7 +1,49 @@
+import re
+
 from voyager.llms import make_chat_model
 from voyager.prompts import load_prompt
 from voyager.utils.json_utils import fix_and_parse_json
 from langchain.schema import HumanMessage, SystemMessage
+
+
+# items that only exist after smelting or cooking, so having them proves the task
+SMELTED_ITEMS = {"glass", "stone", "smooth_stone", "charcoal", "brick", "baked_potato", "dried_kelp"}
+
+
+def inventory_check(task, events):
+    """
+    Decide simple "Craft/Mine/Smelt/... N item" tasks from the final inventory without an LLM call.
+    Returns True when the inventory proves success, otherwise None and the LLM critic decides,
+    so a failure still gets a written critique.
+    """
+    if any(event_type == "onError" for event_type, _ in events):
+        return None
+    match = re.match(
+        r"^(craft|mine|collect|obtain|get|smelt|cook|equip)\s+(\d+|a|an|one)?\s*(.+?)\.?$",
+        task.strip().lower(),
+    )
+    if not match:
+        return None
+    verb, count, name = match.groups()
+    count = int(count) if count and count.isdigit() else 1
+    name = re.sub(r"\s+", "_", name.strip()).removeprefix("wood_")
+    candidates = {name, name.removesuffix("s"), name.removesuffix("es")}
+
+    def matches(key):
+        return any(key == c or key.endswith("_" + c) for c in candidates)
+
+    observation = events[-1][1]
+    if verb == "equip":
+        return True if any(matches(k) for k in observation["status"]["equipment"] if k) else None
+    found = {k: v for k, v in observation["inventory"].items() if matches(k)}
+    if verb in ["smelt", "cook"]:
+        # the raw ingredient matches the same name, only count real outputs
+        found = {
+            k: v
+            for k, v in found.items()
+            if k.startswith("cooked_") or k.endswith("_ingot") or k in SMELTED_ITEMS
+        }
+    return True if sum(found.values()) >= count else None
 
 
 class CriticAgent:
@@ -139,6 +181,9 @@ class CriticAgent:
         if self.mode == "manual":
             return self.human_check_task_success()
         elif self.mode == "auto":
+            if inventory_check(task, events):
+                print(f"\033[31mCritic Agent: inventory shows {task} is done\033[0m")
+                return True, ""
             return self.ai_check_task_success(
                 messages=messages, max_retries=max_retries
             )

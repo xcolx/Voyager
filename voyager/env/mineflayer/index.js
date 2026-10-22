@@ -480,7 +480,8 @@ app.post("/pause", (req, res) => {
     (bot._chat || bot.chat)("/pause");
     // a disconnect stops ticks, so also answer when the bot ends
     const ended = new Promise((resolve) => bot.once("end", resolve));
-    Promise.race([bot.waitForTicks(bot.waitTicks), ended]).then(() => {
+    // a couple of ticks are enough for the command to go out, chat is only collected during steps
+    Promise.race([bot.waitForTicks(2), ended]).then(() => {
         res.json({ message: "Success", disconnected: botDisconnected });
     });
 });

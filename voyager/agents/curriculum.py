@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import random
 import re
+from concurrent.futures import ThreadPoolExecutor
 
 import voyager.utils as U
 from voyager.llms import make_chat_model, make_embeddings
@@ -408,7 +409,7 @@ class CurriculumAgent:
             events=events, chest_observation=chest_observation
         )
         questions = []
-        answers = []
+        uncached = []
         for question in questions_new:
             if self.qa_cache_questions_vectordb._collection.count() > 0:
                 docs_and_scores = (
@@ -419,20 +420,26 @@ class CurriculumAgent:
                 if docs_and_scores and docs_and_scores[0][1] < 0.05:
                     question_cached = docs_and_scores[0][0].page_content
                     assert question_cached in self.qa_cache
-                    answer_cached = self.qa_cache[question_cached]
                     questions.append(question_cached)
-                    answers.append(answer_cached)
                     continue
-            answer = self.run_qa_step2_answer_questions(question=question)
-            assert question not in self.qa_cache
-            self.qa_cache[question] = answer
-            self.qa_cache_questions_vectordb.add_texts(
-                texts=[question],
-            )
+            questions.append(question)
+            if question not in self.qa_cache and question not in uncached:
+                uncached.append(question)
+        # the answers do not depend on each other, so ask them all at once
+        if uncached:
+            with ThreadPoolExecutor(max_workers=len(uncached)) as pool:
+                new_answers = list(
+                    pool.map(
+                        lambda q: self.run_qa_step2_answer_questions(question=q),
+                        uncached,
+                    )
+                )
+            for question, answer in zip(uncached, new_answers):
+                self.qa_cache[question] = answer
+            self.qa_cache_questions_vectordb.add_texts(texts=uncached)
             U.dump_json(self.qa_cache, f"{self.ckpt_dir}/curriculum/qa_cache.json")
             self.qa_cache_questions_vectordb.persist()
-            questions.append(question)
-            answers.append(answer)
+        answers = [self.qa_cache[question] for question in questions]
         assert len(questions_new) == len(questions) == len(answers)
         return questions, answers
 
@@ -514,7 +521,8 @@ class CurriculumAgent:
             self.render_system_message_qa_step2_answer_questions(),
             self.render_human_message_qa_step2_answer_questions(question=question),
         ]
-        print(f"\033[35mCurriculum Agent Question: {question}\033[0m")
         qa_answer = self.qa_llm(messages).content
+        # questions can be answered in parallel, so print each one with its answer
+        print(f"\033[35mCurriculum Agent Question: {question}\033[0m")
         print(f"\033[31mCurriculum Agent {qa_answer}\033[0m")
         return qa_answer

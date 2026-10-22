@@ -3,6 +3,8 @@ import json
 import os
 import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from typing import Dict
 
 import voyager.utils as U
@@ -13,6 +15,16 @@ from .agents import ActionAgent
 from .agents import CriticAgent
 from .agents import CurriculumAgent
 from .agents import SkillManager
+
+
+@contextmanager
+def timed(label):
+    # print how long each phase takes, to see where the time between actions goes
+    start = time.perf_counter()
+    try:
+        yield
+    finally:
+        print(f"\033[90m[time] {label}: {time.perf_counter() - start:.1f}s\033[0m")
 
 
 # TODO: remove event memory
@@ -178,20 +190,28 @@ class Voyager:
         self.messages = None
         self.conversations = []
         self.last_events = None
+        # skill descriptions are written in the background while the next task is proposed
+        self._skill_pool = ThreadPoolExecutor(max_workers=1)
+        self._pending_skill = None
 
     def reset(self, task, context="", reset_env=True):
         self.action_agent_rollout_num_iter = 0
         self.task = task
         self.context = context
-        if reset_env:
-            self.env.reset(
-                options={
-                    "mode": "soft",
-                    "wait_ticks": self.env_wait_ticks,
-                }
-            )
-        # step to peek an observation, time of day and difficulty are left to the world
-        events = self.env.step("")
+        if self.last_events and self.env.has_reset:
+            # start from the last observation, a fresh mineflayer is only needed after an error,
+            # and the env already rejoins on its own then
+            events = [copy.deepcopy(self.last_events[-1])]
+        else:
+            if reset_env:
+                self.env.reset(
+                    options={
+                        "mode": "soft",
+                        "wait_ticks": self.env_wait_ticks,
+                    }
+                )
+            # step to peek an observation, time of day and difficulty are left to the world
+            events = self.env.step("")
         skills = self.skill_manager.retrieve_skills(query=self.context)
         print(
             f"\033[33mRender Action Agent system message with {len(skills)} skills\033[0m"
@@ -214,7 +234,8 @@ class Voyager:
     def step(self):
         if self.action_agent_rollout_num_iter < 0:
             raise ValueError("Agent must be reset before stepping")
-        ai_message = self.action_agent.llm(self.messages)
+        with timed("action agent"):
+            ai_message = self.action_agent.llm(self.messages)
         print(f"\033[34m****Action Agent ai message****\n{ai_message.content}\033[0m")
         self.conversations.append(
             (self.messages[0].content, self.messages[1].content, ai_message.content)
@@ -223,20 +244,22 @@ class Voyager:
         success = False
         if isinstance(parsed_result, dict):
             code = parsed_result["program_code"] + "\n" + parsed_result["exec_code"]
-            events = self.env.step(
-                code,
-                programs=self.skill_manager.programs,
-            )
+            with timed("code execution"):
+                events = self.env.step(
+                    code,
+                    programs=self.skill_manager.programs,
+                )
             self.recorder.record(events, self.task)
             self.curriculum_agent.update_deaths(events)
             self.action_agent.update_chest_memory(events[-1][1]["nearbyChests"])
-            success, critique = self.critic_agent.check_task_success(
-                events=events,
-                task=self.task,
-                context=self.context,
-                chest_observation=self.action_agent.render_chest_observation(),
-                max_retries=5,
-            )
+            with timed("critic"):
+                success, critique = self.critic_agent.check_task_success(
+                    events=events,
+                    task=self.task,
+                    context=self.context,
+                    chest_observation=self.action_agent.render_chest_observation(),
+                    max_retries=5,
+                )
 
             if self.reset_placed_if_failed and not success:
                 # revert all the placing event in the last step
@@ -328,6 +351,18 @@ class Voyager:
         time.sleep(30 * failures)
         return failures
 
+    def _wait_for_skill(self):
+        # the next rollout retrieves skills and runs their code, so the new one must be saved first
+        if self._pending_skill is None:
+            return
+        try:
+            with timed("waiting for skill description"):
+                self._pending_skill.result()
+        except Exception as e:
+            print(f"\033[41mFailed to add the new skill: {e}\033[0m")
+            traceback.print_exc()
+        self._pending_skill = None
+
     def learn(self, reset_env=True):
         self._recover_env()
         agent_failures = 0
@@ -337,17 +372,19 @@ class Voyager:
                 print("Iteration limit reached")
                 break
             try:
-                task, context = self.curriculum_agent.propose_next_task(
-                    events=self.last_events,
-                    chest_observation=self.action_agent.render_chest_observation(),
-                    max_retries=5,
-                )
+                with timed("curriculum"):
+                    task, context = self.curriculum_agent.propose_next_task(
+                        events=self.last_events,
+                        chest_observation=self.action_agent.render_chest_observation(),
+                        max_retries=5,
+                    )
             except Exception as e:
                 agent_failures = self._on_agent_failure(e, agent_failures)
                 continue
             print(
                 f"\033[35mStarting task {task} for at most {self.action_agent_task_max_retries} times\033[0m"
             )
+            self._wait_for_skill()
             try:
                 messages, reward, done, info = self.rollout(
                     task=task,
@@ -371,7 +408,9 @@ class Voyager:
             agent_failures = 0
 
             if info["success"]:
-                self.skill_manager.add_new_skill(info)
+                self._pending_skill = self._skill_pool.submit(
+                    self.skill_manager.add_new_skill, info
+                )
 
             self.curriculum_agent.update_exploration_progress(info)
             print(
@@ -381,6 +420,7 @@ class Voyager:
                 f"\033[35mFailed tasks: {', '.join(self.curriculum_agent.failed_tasks)}\033[0m"
             )
 
+        self._wait_for_skill()
         return {
             "completed_tasks": self.curriculum_agent.completed_tasks,
             "failed_tasks": self.curriculum_agent.failed_tasks,
